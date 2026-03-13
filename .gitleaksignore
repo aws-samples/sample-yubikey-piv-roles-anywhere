@@ -1,0 +1,25 @@
+# Gitleaks ignore file
+# These are false positives - test fixtures using AWS example credentials from documentation
+
+# .gitleaksignore itself - gitleaks flags the fingerprint entries in this file
+e516a45715fb550edd2aad9fca79e37a0edeba57:.gitleaksignore:aws-access-token:3
+
+# python/tests/test_roles_anywhere_client.py - current file (fingerprint 65536fbb...)
+65536fbb1ac1b20bfbbcd21a671682c51d9a9119:python/tests/test_roles_anywhere_client.py:aws-access-token:292
+65536fbb1ac1b20bfbbcd21a671682c51d9a9119:python/tests/test_roles_anywhere_client.py:aws-access-token:302
+
+# tests/test_roles_anywhere_client.py - old git history before move to python/ (fingerprint 1252f8d1...)
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:48
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:62
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:76
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:84
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:91
+1252f8d1029a1749c31976bceba88c506c4d4fe7:tests/test_roles_anywhere_client.py:aws-access-token:105
+
+# rust/src/roles_anywhere_client.rs - test fixtures using AWS example credentials
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:332
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:342
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:351
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:364
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:475
+ee4eb8377cb9ef1b405fbf282d2591083985b975:rust/src/roles_anywhere_client.rs:aws-access-token:504

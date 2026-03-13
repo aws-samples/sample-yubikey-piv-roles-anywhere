@@ -1,0 +1,10 @@
+# Gitleaks configuration
+# Allowlist false positives from test files using AWS example credentials
+
+[allowlist]
+  description = "Test files using AWS documentation example credentials"
+  paths = [
+    '''rust/src/roles_anywhere_client\.rs''',
+    '''python/tests/test_roles_anywhere_client\.py''',
+    '''\.gitleaksignore''',
+  ]
