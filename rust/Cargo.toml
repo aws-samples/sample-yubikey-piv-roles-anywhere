@@ -46,7 +46,7 @@ percent-encoding = "2"
 num-bigint-dig = "0.8"
 
 # Secure PIN input
-rpassword = "7"
+rpassword = "7.5"
 
 [dev-dependencies]
 proptest = "1"
