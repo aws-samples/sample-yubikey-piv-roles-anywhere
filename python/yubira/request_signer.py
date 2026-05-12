@@ -50,9 +50,7 @@ class SignedRequest:
 
 SignatureAlgorithm = Literal[
     "RSA-SHA256", 
-    "RSA-SHA384", 
     "ECDSA-SHA256", 
-    "ECDSA-SHA384"
 ]
 
 
@@ -104,13 +102,9 @@ class RequestSigner:
             if isinstance(public_key, rsa.RSAPublicKey):
                 self._cached_algorithm = "RSA-SHA256"
             elif isinstance(public_key, ec.EllipticCurvePublicKey):
-                # Check curve size to determine hash algorithm
-                curve_name = public_key.curve.name
-                if curve_name in ("secp384r1", "prime384v1"):
-                    self._cached_algorithm = "ECDSA-SHA384"
-                else:
-                    # Default to SHA256 for P-256 and other curves
-                    self._cached_algorithm = "ECDSA-SHA256"
+                # IAM Roles Anywhere only accepts SHA256 digests, even for P-384 keys.
+                # The signing algorithm is always ECDSA-SHA256 regardless of curve size.
+                self._cached_algorithm = "ECDSA-SHA256"
             else:
                 raise SigningError(f"Unsupported key type: {type(public_key)}")
             
@@ -331,11 +325,8 @@ class RequestSigner:
         try:
             algorithm = self.get_signature_algorithm()
             
-            # Determine hash algorithm
-            if "SHA384" in algorithm:
-                hash_alg = hashes.SHA384()
-            else:
-                hash_alg = hashes.SHA256()
+            # IAM Roles Anywhere requires SHA256 for all key types
+            hash_alg = hashes.SHA256()
             
             # Get the slot's metadata to determine key type
             cert = self._session.get_certificate(self._slot)

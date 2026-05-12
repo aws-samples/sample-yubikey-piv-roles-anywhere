@@ -95,8 +95,8 @@ class TestSignatureAlgorithmSelection:
         
         assert algorithm == "ECDSA-SHA256"
 
-    def test_get_signature_algorithm_returns_sha384_with_ecdsa_for_p384_key(self):
-        """Test that P-384 EC keys return ECDSA-SHA384 algorithm."""
+    def test_get_signature_algorithm_returns_sha256_with_ecdsa_for_p384_key(self):
+        """Test that P-384 EC keys return ECDSA-SHA256 algorithm (IAM Roles Anywhere requires SHA256)."""
         cert = create_mock_certificate(key_type="EC384")
         mock_session = MagicMock()
         mock_session.get_certificate.return_value = cert
@@ -104,7 +104,7 @@ class TestSignatureAlgorithmSelection:
         signer = RequestSigner(mock_session)
         algorithm = signer.get_signature_algorithm()
         
-        assert algorithm == "ECDSA-SHA384"
+        assert algorithm == "ECDSA-SHA256"
 
     def test_get_signature_algorithm_raises_error_when_no_certificate(self):
         """Test that missing certificate raises SigningError."""

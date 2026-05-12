@@ -38,11 +38,14 @@ const URI_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 /// Get the algorithm string for the Authorization header.
+///
+/// IAM Roles Anywhere only accepts SHA256 digests for all key types,
+/// even when using P-384 EC keys. The algorithm is always ECDSA-SHA256
+/// or RSA-SHA256.
 pub fn algorithm_string(key_type: KeyType) -> &'static str {
     match key_type {
         KeyType::Rsa => "RSA-SHA256",
-        KeyType::EcP256 => "ECDSA-SHA256",
-        KeyType::EcP384 => "ECDSA-SHA384",
+        KeyType::EcP256 | KeyType::EcP384 => "ECDSA-SHA256",
     }
 }
 
@@ -109,17 +112,11 @@ pub fn sign(
     };
 
     // Build the input for piv::sign_data.
-    // For ECDSA: raw hash bytes.
+    // For ECDSA: raw SHA-256 hash bytes (IAM Roles Anywhere requires SHA256 for all key types).
     // For RSA: full PKCS#1 v1.5 padded block (key-size bytes).
     // The YubiKey performs raw RSA — we must provide the complete padded message.
     let sign_input: Vec<u8> = match key_type {
-        KeyType::EcP384 => {
-            use sha2::Sha384;
-            let mut hasher = Sha384::new();
-            hasher.update(data);
-            hasher.finalize().to_vec()
-        }
-        KeyType::EcP256 => {
+        KeyType::EcP256 | KeyType::EcP384 => {
             let mut hasher = Sha256::new();
             hasher.update(data);
             hasher.finalize().to_vec()
@@ -311,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_full_algorithm_ec384() {
-        assert_eq!(full_algorithm(KeyType::EcP384), "AWS4-X509-ECDSA-SHA384");
+        assert_eq!(full_algorithm(KeyType::EcP384), "AWS4-X509-ECDSA-SHA256");
     }
 
     #[test]
@@ -326,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_algorithm_string_ec384() {
-        assert_eq!(algorithm_string(KeyType::EcP384), "ECDSA-SHA384");
+        assert_eq!(algorithm_string(KeyType::EcP384), "ECDSA-SHA256");
     }
 
     #[test]
