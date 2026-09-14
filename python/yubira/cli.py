@@ -22,6 +22,8 @@ This module provides the command-line interface entry point.
 """
 
 import argparse
+from yubira.input_validation import ConfigurationError, validate_configuration
+from yubira.certificate_chain import CertificateChainError, load_certificate_chain
 import json
 import sys
 from typing import NoReturn
@@ -29,6 +31,7 @@ from typing import NoReturn
 from yubira import (
     YubiKeyConnector,
     YubiKeyConnectionError,
+    MultipleYubiKeysError,
     YubiKeyNotFoundError,
     CertificateReader,
     CertificateNotFoundError,
@@ -128,6 +131,14 @@ Environment Variables:
         type=int,
         help="YubiKey serial number (if multiple devices connected)"
     )
+
+    parser.add_argument(
+        "--certificate-chain",
+        help=(
+            "Optional PEM bundle of up to five intermediates, ordered from "
+            "the leaf issuer toward the trust anchor"
+        ),
+    )
     
     parser.add_argument(
         "--session-duration",
@@ -139,7 +150,7 @@ Environment Variables:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug output (prints request details to stderr)"
+        help="Enable redacted debug diagnostics (never prints credentials or signed requests)"
     )
     
     return parser
@@ -161,6 +172,17 @@ def main() -> int:
     except ValueError as e:
         error_exit(str(e), EXIT_NO_CERTIFICATE)
     
+    try:
+        validate_configuration(
+            args.trust_anchor_arn,
+            args.profile_arn,
+            args.role_arn,
+            args.region,
+            args.session_duration,
+        )
+    except ConfigurationError as exc:
+        error_exit(f"Invalid configuration: {exc}", EXIT_API_ERROR)
+
     # Connect to YubiKey
     connector = YubiKeyConnector(serial=args.serial)
     
@@ -171,8 +193,13 @@ def main() -> int:
             error_exit(f"YubiKey with serial {args.serial} not found.", EXIT_NO_DEVICE)
         else:
             error_exit("No YubiKey detected. Please insert a YubiKey.", EXIT_NO_DEVICE)
-    except YubiKeyConnectionError as e:
-        error_exit(f"Failed to connect to YubiKey: {e}", EXIT_CONNECTION_FAILED)
+    except MultipleYubiKeysError:
+        error_exit(
+            "Multiple YubiKeys detected. Specify --serial.",
+            EXIT_CONNECTION_FAILED,
+        )
+    except YubiKeyConnectionError:
+        error_exit("Failed to connect to YubiKey.", EXIT_CONNECTION_FAILED)
     
     try:
         # Get PIV session
@@ -185,8 +212,8 @@ def main() -> int:
         except CertificateNotFoundError:
             slot_name = args.slot.lower()
             error_exit(f"No certificate found in slot {slot_name}.", EXIT_NO_CERTIFICATE)
-        except CertificateReadError as e:
-            error_exit(f"Failed to read certificate: {e}", EXIT_NO_CERTIFICATE)
+        except CertificateReadError:
+            error_exit("Failed to read certificate.", EXIT_NO_CERTIFICATE)
         
         # Check if certificate is expired
         # nosemgrep: is-function-without-parentheses
@@ -195,17 +222,38 @@ def main() -> int:
                 f"Certificate expired on {cert_info.not_after.strftime('%Y-%m-%d')}.",
                 EXIT_CERTIFICATE_EXPIRED
             )
+        # nosemgrep: is-function-without-parentheses
+        if cert_info.is_not_yet_valid is True:
+            error_exit(
+                f"Certificate is not valid before "
+                f"{cert_info.not_before.strftime('%Y-%m-%d')}.",
+                EXIT_CERTIFICATE_EXPIRED,
+            )
+
+        certificate_chain_der = None
+        if args.certificate_chain:
+            try:
+                certificate_chain_der = load_certificate_chain(
+                    args.certificate_chain,
+                    cert_info.to_der(),
+                )
+            except CertificateChainError as exc:
+                error_exit(f"Invalid certificate chain: {exc}", EXIT_NO_CERTIFICATE)
         
         # Handle PIN verification
         pin_handler = PinHandler(session)
         
         if pin_handler.is_pin_required(slot):
             try:
-                pin, source = pin_handler.get_pin_auto()
-            except PinRequiredError as e:
+                pin, _source = pin_handler.get_pin_auto()
+            except PinRequiredError:
                 error_exit("PIN verification required.", EXIT_PIN_ERROR)
-            
-            result = pin_handler.verify_pin(pin)
+
+            try:
+                result = pin_handler.verify_pin(pin)
+            finally:
+                # Minimize lifetime; Python cannot reliably scrub immutable str.
+                del pin
             
             if not result.success:
                 if result.retries_remaining is not None:
@@ -233,26 +281,29 @@ def main() -> int:
             credentials = client.create_session(
                 certificate_der=cert_info.to_der(),
                 signer=signer,
+                certificate_chain_der=certificate_chain_der,
                 debug=args.debug
             )
-        except SigningError as e:
-            error_exit(f"Signing failed: {e}", EXIT_API_ERROR)
-        except RolesAnywhereAPIError as e:
-            error_exit(f"CreateSession failed: {e}", EXIT_API_ERROR)
-        except RolesAnywhereNetworkError as e:
-            error_exit(f"Network error: {e}", EXIT_NETWORK_ERROR)
+        except SigningError:
+            error_exit("Signing failed.", EXIT_API_ERROR)
+        except RolesAnywhereAPIError:
+            error_exit("CreateSession request failed.", EXIT_API_ERROR)
+        except RolesAnywhereNetworkError:
+            error_exit("Network request failed.", EXIT_NETWORK_ERROR)
         
-        # Output credentials as JSON to stdout
+        # Stream credential JSON directly to stdout without logging or creating
+        # an additional aggregate formatted string.
         output = credentials.to_credential_process_output()
-        print(json.dumps(output))
+        json.dump(output, sys.stdout, separators=(",", ":"))
+        sys.stdout.write("\n")
         
         return EXIT_SUCCESS
         
     except PinBlockedError:
         error_exit("PIN is blocked. Use PUK to unblock.", EXIT_PIN_ERROR)
-    except Exception as e:
-        # Catch any unexpected errors
-        error_exit(f"Unexpected error: {e}", EXIT_API_ERROR)
+    except Exception:
+        # Keep arbitrary library/device details out of credential-process stderr.
+        error_exit("Unexpected internal error.", EXIT_API_ERROR)
     finally:
         connector.close()
 

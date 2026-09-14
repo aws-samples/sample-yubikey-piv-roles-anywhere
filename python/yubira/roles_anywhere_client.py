@@ -17,7 +17,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 """Roles Anywhere client module for obtaining AWS credentials via IAM Roles Anywhere."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 import base64
@@ -27,6 +27,8 @@ import sys
 
 import requests
 
+from .certificate_chain import encode_certificate_chain, validate_certificate_chain
+from .input_validation import validate_configuration
 from .request_signer import RequestSigner, SigningError
 
 
@@ -53,9 +55,9 @@ class RolesAnywhereNetworkError(RolesAnywhereError):
 class AWSCredentials:
     """AWS temporary credentials returned by IAM Roles Anywhere."""
     
-    access_key_id: str
-    secret_access_key: str
-    session_token: str
+    access_key_id: str = field(repr=False)
+    secret_access_key: str = field(repr=False)
+    session_token: str = field(repr=False)
     expiration: datetime
     
     def to_credential_process_output(self) -> dict:
@@ -105,6 +107,13 @@ class RolesAnywhereClient:
             region: AWS region for the Roles Anywhere endpoint.
             session_duration: Duration in seconds for the session (default 3600).
         """
+        validate_configuration(
+            trust_anchor_arn,
+            profile_arn,
+            role_arn,
+            region,
+            session_duration,
+        )
         self._trust_anchor_arn = trust_anchor_arn
         self._profile_arn = profile_arn
         self._role_arn = role_arn
@@ -154,7 +163,8 @@ class RolesAnywhereClient:
         self,
         certificate_der: bytes,
         timestamp: datetime,
-        content_length: int
+        content_length: int,
+        certificate_chain_der: tuple[bytes, ...] | None = None,
     ) -> dict[str, str]:
         """
         Build the request headers.
@@ -173,13 +183,20 @@ class RolesAnywhereClient:
         # Format timestamp as ISO8601 basic format
         amz_date = timestamp.strftime("%Y%m%dT%H%M%SZ")
         
-        return {
+        headers = {
             "Host": self.host,
             "Content-Type": "application/json",
             "X-Amz-Date": amz_date,
             "X-Amz-X509": cert_b64,
             "Content-Length": str(content_length)
         }
+        if certificate_chain_der is not None:
+            validated_chain = validate_certificate_chain(
+                certificate_der,
+                certificate_chain_der,
+            )
+            headers["X-Amz-X509-Chain"] = encode_certificate_chain(validated_chain)
+        return headers
     
     def _parse_response(self, response: requests.Response) -> AWSCredentials:
         """
@@ -222,7 +239,14 @@ class RolesAnywhereClient:
                     status_code=response.status_code
                 )
             
-            creds = credential_set[0].get("credentials", {})
+            entry = credential_set[0]
+            if entry.get("roleArn") != self._role_arn:
+                raise RolesAnywhereAPIError(
+                    "Returned role does not match requested role",
+                    status_code=response.status_code,
+                )
+
+            creds = entry.get("credentials", {})
             
             access_key_id = creds.get("accessKeyId")
             secret_access_key = creds.get("secretAccessKey")
@@ -258,7 +282,8 @@ class RolesAnywhereClient:
         self,
         certificate_der: bytes,
         signer: RequestSigner,
-        debug: bool = False
+        debug: bool = False,
+        certificate_chain_der: tuple[bytes, ...] | None = None,
     ) -> AWSCredentials:
         """
         Call CreateSession API with signed request.
@@ -296,7 +321,8 @@ class RolesAnywhereClient:
         headers = self._build_headers(
             certificate_der=certificate_der,
             timestamp=timestamp,
-            content_length=len(body)
+            content_length=len(body),
+            certificate_chain_der=certificate_chain_der,
         )
         
         # Sign the request (with query string)
@@ -326,13 +352,9 @@ class RolesAnywhereClient:
                 timeout=30
             )
             
-            # Debug response
+            # Debug response without credential-bearing headers or body.
             if debug:
-                print("\n=== RESPONSE ===", file=sys.stderr)
-                print(f"Status: {response.status_code}", file=sys.stderr)
-                print(f"Headers: {dict(response.headers)}", file=sys.stderr)
-                print(f"Body: {response.text}", file=sys.stderr)
-                print("================\n", file=sys.stderr)
+                self._print_response_debug(response)
             
             # Note: We don't use raise_for_status() because _parse_response
             # handles error status codes with custom error messages from the API response
@@ -360,25 +382,26 @@ class RolesAnywhereClient:
         signer: RequestSigner,
         timestamp: datetime
     ) -> None:
-        """Print debug information about the request."""
-        print("\n=== DEBUG: REQUEST DETAILS ===", file=sys.stderr)
-        print(f"URL: {url}", file=sys.stderr)
-        print(f"Method: POST", file=sys.stderr)
+        """Print diagnostics without credential or replayable request material."""
+        base_url = url.partition("?")[0]
+        print("\n=== DEBUG: REDACTED REQUEST DETAILS ===", file=sys.stderr)
+        print(f"URL: {base_url}?<redacted>", file=sys.stderr)
+        print("Method: POST", file=sys.stderr)
         print(f"Timestamp: {timestamp.isoformat()}", file=sys.stderr)
-        print(f"\n--- Headers ---", file=sys.stderr)
+        print("\n--- Headers ---", file=sys.stderr)
+        safe_headers = {"host", "content-type", "x-amz-date", "content-length"}
         for name, value in sorted(headers.items()):
-            if name.lower() == "x-amz-x509":
-                # Truncate certificate for readability
-                print(f"{name}: {value[:50]}...{value[-20:]}", file=sys.stderr)
-            else:
+            if name.lower() in safe_headers:
                 print(f"{name}: {value}", file=sys.stderr)
-        print(f"\n--- Body ---", file=sys.stderr)
-        print(body.decode("utf-8"), file=sys.stderr)
-        
-        # Also print the canonical request for debugging
+            else:
+                print(f"{name}: <redacted>", file=sys.stderr)
+
         payload_hash = hashlib.sha256(body).hexdigest()
-        # Remove Authorization header for canonical request computation
-        headers_for_canonical = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+        headers_for_canonical = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() != "authorization"
+        }
         canonical_request = signer.create_canonical_request(
             method="POST",
             uri=self.API_PATH,
@@ -386,15 +409,38 @@ class RolesAnywhereClient:
             headers=headers_for_canonical,
             payload_hash=payload_hash
         )
-        print(f"\n--- Canonical Request ---", file=sys.stderr)
-        print(canonical_request, file=sys.stderr)
-        
-        # Print string to sign
         string_to_sign = signer.create_string_to_sign(
             timestamp=timestamp,
             region=self._region,
             canonical_request=canonical_request
         )
-        print(f"\n--- String to Sign ---", file=sys.stderr)
-        print(string_to_sign, file=sys.stderr)
-        print("==============================\n", file=sys.stderr)
+
+        print(f"Payload SHA-256: {payload_hash}", file=sys.stderr)
+        print(
+            "Canonical request SHA-256: "
+            f"{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}",
+            file=sys.stderr,
+        )
+        print(
+            "String-to-sign SHA-256: "
+            f"{hashlib.sha256(string_to_sign.encode('utf-8')).hexdigest()}",
+            file=sys.stderr,
+        )
+        print("Sensitive request fields and response bodies are omitted.", file=sys.stderr)
+        print("=======================================\n", file=sys.stderr)
+
+    @staticmethod
+    def _print_response_debug(response: requests.Response) -> None:
+        """Print safe response metadata while always omitting the body."""
+        request_id = (
+            response.headers.get("x-amzn-requestid")
+            or response.headers.get("x-amz-request-id")
+            or "<unavailable>"
+        )
+        content_type = response.headers.get("content-type", "<unavailable>")
+        print("\n=== DEBUG: REDACTED RESPONSE ===", file=sys.stderr)
+        print(f"Status: {response.status_code}", file=sys.stderr)
+        print(f"Request ID: {request_id}", file=sys.stderr)
+        print(f"Content-Type: {content_type}", file=sys.stderr)
+        print("Body: <redacted>", file=sys.stderr)
+        print("================================\n", file=sys.stderr)

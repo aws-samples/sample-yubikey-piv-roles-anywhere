@@ -36,6 +36,11 @@ class YubiKeyConnectionError(Exception):
     pass
 
 
+class MultipleYubiKeysError(YubiKeyConnectionError):
+    """Raised when optional serial selection is ambiguous."""
+    pass
+
+
 class YubiKeyNotFoundError(Exception):
     """Raised when no YubiKey is detected or specified serial not found."""
     pass
@@ -54,8 +59,8 @@ class YubiKeyConnector:
         Initialize connector, optionally targeting specific serial number.
         
         Args:
-            serial: Optional YubiKey serial number to connect to.
-                   If None, connects to the first available device.
+            serial: Optional YubiKey serial number to connect to. If omitted,
+                    connects only when exactly one device is available.
         """
         self._serial = serial
         self._connection: Optional[SmartCardConnection] = None
@@ -112,7 +117,10 @@ class YubiKeyConnector:
                         f"YubiKey with serial {self._serial} not found."
                     )
             else:
-                # Use first available device
+                if len(all_devices) > 1:
+                    raise MultipleYubiKeysError(
+                        "Multiple YubiKeys detected. Specify --serial."
+                    )
                 target_device, target_info = all_devices[0]
             
             # Connect to the device
@@ -126,7 +134,7 @@ class YubiKeyConnector:
             
             return self._device_info
             
-        except YubiKeyNotFoundError:
+        except (YubiKeyNotFoundError, MultipleYubiKeysError):
             raise
         except Exception as e:
             raise YubiKeyConnectionError(f"Failed to connect to YubiKey: {e}") from e

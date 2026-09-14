@@ -32,6 +32,7 @@ from yubira.yubikey_connector import (
     YubiKeyInfo,
     YubiKeyNotFoundError,
     YubiKeyConnectionError,
+    MultipleYubiKeysError,
 )
 
 
@@ -196,8 +197,8 @@ class TestContextManager:
 class TestConnectSuccess:
     """Tests for successful connection scenarios."""
 
-    def test_connect_to_first_device_when_no_serial_specified(self):
-        """Test that connect uses first device when no serial specified."""
+    def test_connect_requires_serial_when_multiple_devices_present(self):
+        """Test optional serial becomes required only when selection is ambiguous."""
         mock_devices = [
             (MockDevice(11111111, (5, 2, 4)), MockDeviceInfo(serial=11111111, version=(5, 2, 4))),
             (MockDevice(22222222, (5, 4, 3)), MockDeviceInfo(serial=22222222, version=(5, 4, 3))),
@@ -205,11 +206,10 @@ class TestConnectSuccess:
         
         with patch('yubira.yubikey_connector.list_all_devices', return_value=mock_devices):
             connector = YubiKeyConnector()
-            device_info = connector.connect()
-            
-            assert device_info.serial == 11111111
-            assert connector.is_connected
-            connector.close()
+            with pytest.raises(MultipleYubiKeysError, match="Specify --serial"):
+                connector.connect()
+
+        assert not connector.is_connected
 
     def test_connect_to_specific_serial(self):
         """Test that connect finds device with specified serial."""

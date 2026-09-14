@@ -20,35 +20,39 @@ use yubikey::YubiKey;
 
 use crate::error::YubiraError;
 
-/// Connect to a YubiKey, optionally filtering by serial number.
+fn open_by_serial(serial_num: u32) -> Result<YubiKey, YubiraError> {
+    let serial = yubikey::Serial::from(serial_num);
+    YubiKey::open_by_serial(serial).map_err(|e| {
+        if e.to_string().contains("not found") {
+            YubiraError::NoDevice(format!("YubiKey with serial {serial_num} not found."))
+        } else {
+            YubiraError::ConnectionFailed(e.to_string())
+        }
+    })
+}
+
+fn select_only_serial(serials: &[u32]) -> Result<u32, YubiraError> {
+    match serials {
+        [] => Err(YubiraError::NoDevice(
+            "No YubiKey detected. Please insert a YubiKey.".to_string(),
+        )),
+        [serial] => Ok(*serial),
+        _ => Err(YubiraError::ConnectionFailed(
+            "Multiple YubiKeys detected. Specify --serial.".to_string(),
+        )),
+    }
+}
+
+/// Connect to a YubiKey. An explicit serial remains optional when exactly one
+/// device is connected and is required only when auto-selection is ambiguous.
 pub fn connect(serial: Option<u32>) -> Result<YubiKey, YubiraError> {
     match serial {
-        Some(serial_num) => {
-            let serial = yubikey::Serial::from(serial_num);
-            YubiKey::open_by_serial(serial).map_err(|e| {
-                if e.to_string().contains("not found") {
-                    YubiraError::NoDevice(format!(
-                        "YubiKey with serial {serial_num} not found."
-                    ))
-                } else {
-                    YubiraError::ConnectionFailed(e.to_string())
-                }
-            })
-        }
-        None => YubiKey::open().map_err(|e| {
-            if e.to_string().contains("not found") {
-                YubiraError::NoDevice(
-                    "No YubiKey detected. Please insert a YubiKey.".to_string(),
-                )
-            } else {
-                YubiraError::ConnectionFailed(e.to_string())
-            }
-        }),
+        Some(serial_num) => open_by_serial(serial_num),
+        None => open_by_serial(select_only_serial(&list_serials()?)?),
     }
 }
 
 /// List serial numbers of all connected YubiKeys.
-#[allow(dead_code)]
 pub fn list_serials() -> Result<Vec<u32>, YubiraError> {
     let mut readers = yubikey::reader::Context::open()
         .map_err(|e| YubiraError::ConnectionFailed(e.to_string()))?;
@@ -63,4 +67,31 @@ pub fn list_serials() -> Result<Vec<u32>, YubiraError> {
         }
     }
     Ok(serials)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_device_is_rejected() {
+        let err = select_only_serial(&[]).unwrap_err();
+        assert!(matches!(err, YubiraError::NoDevice(_)));
+    }
+
+    #[test]
+    fn one_device_is_selected_without_serial_parameter() {
+        assert_eq!(select_only_serial(&[12_345_678]).unwrap(), 12_345_678);
+    }
+
+    #[test]
+    fn multiple_devices_require_serial_parameter() {
+        let err = select_only_serial(&[11_111_111, 22_222_222]).unwrap_err();
+        match err {
+            YubiraError::ConnectionFailed(msg) => {
+                assert_eq!(msg, "Multiple YubiKeys detected. Specify --serial.");
+            }
+            _ => panic!("Expected ConnectionFailed error"),
+        }
+    }
 }

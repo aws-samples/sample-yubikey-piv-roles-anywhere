@@ -62,8 +62,8 @@ def create_mock_certificate(key_type: str = "RSA") -> x509.Certificate:
         .issuer_name(subject)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow())
-        .not_valid_after(datetime(2030, 12, 31))
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime(2030, 12, 31, tzinfo=timezone.utc))
         .sign(private_key, hashes.SHA256())
     )
     

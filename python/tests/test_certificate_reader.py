@@ -22,7 +22,7 @@ Tests slot parsing, certificate info extraction, and error handling.
 Requirements: 1.3, 1.4, 1.5
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -53,9 +53,9 @@ def create_mock_certificate(
 ) -> x509.Certificate:
     """Create a mock X.509 certificate for testing."""
     if not_before is None:
-        not_before = datetime.utcnow() - timedelta(days=30)
+        not_before = datetime.now(timezone.utc) - timedelta(days=30)
     if not_after is None:
-        not_after = datetime.utcnow() + timedelta(days=365)
+        not_after = datetime.now(timezone.utc) + timedelta(days=365)
     
     # Generate key based on type
     if key_type == "RSA":
@@ -255,7 +255,7 @@ class TestCertificateValidity:
 
     def test_is_expired_returns_true_for_expired_cert(self):
         """Test that is_expired returns True for expired certificate."""
-        not_after = datetime.utcnow() - timedelta(days=1)
+        not_after = datetime.now(timezone.utc) - timedelta(days=1)
         cert = create_mock_certificate(not_after=not_after)
         mock_session = MagicMock()
         mock_session.get_certificate.return_value = cert
@@ -267,7 +267,7 @@ class TestCertificateValidity:
 
     def test_is_expired_returns_false_for_valid_cert(self):
         """Test that is_expired returns False for valid certificate."""
-        not_after = datetime.utcnow() + timedelta(days=365)
+        not_after = datetime.now(timezone.utc) + timedelta(days=365)
         cert = create_mock_certificate(not_after=not_after)
         mock_session = MagicMock()
         mock_session.get_certificate.return_value = cert
@@ -279,7 +279,7 @@ class TestCertificateValidity:
 
     def test_is_not_yet_valid_returns_true_for_future_cert(self):
         """Test that is_not_yet_valid returns True for future certificate."""
-        not_before = datetime.utcnow() + timedelta(days=30)
+        not_before = datetime.now(timezone.utc) + timedelta(days=30)
         cert = create_mock_certificate(not_before=not_before)
         mock_session = MagicMock()
         mock_session.get_certificate.return_value = cert

@@ -91,23 +91,28 @@ class PinHandler:
                              ENVIRONMENT source.
         """
         if source == PinSource.ENVIRONMENT:
-            pin = os.environ.get(self.ENV_VAR)
-            if pin is None:
+            try:
+                # Consume the value so later child processes and diagnostics do
+                # not inherit it. Python cannot zeroize the returned str.
+                return os.environ.pop(self.ENV_VAR)
+            except KeyError:
                 raise PinRequiredError(
                     f"PIN environment variable {self.ENV_VAR} is not set."
-                )
-            return pin
+                ) from None
         else:
             return getpass.getpass("Enter YubiKey PIV PIN: ")
     
     def get_pin_auto(self) -> tuple[str, PinSource]:
         """
         Get PIN automatically, preferring environment variable over prompt.
+
+        Environment values are consumed exactly once and removed from this
+        process before verification.
         
         Returns:
             Tuple of (pin, source) indicating the PIN and where it came from.
         """
-        pin = os.environ.get(self.ENV_VAR)
+        pin = os.environ.pop(self.ENV_VAR, None)
         if pin is not None:
             return pin, PinSource.ENVIRONMENT
         return getpass.getpass("Enter YubiKey PIV PIN: "), PinSource.PROMPT
@@ -128,27 +133,28 @@ class PinHandler:
         try:
             self._session.verify_pin(pin)
             return PinResult(success=True)
-        except Exception as e:
-            error_msg = str(e).lower()
-            
-            # Check if PIN is blocked
-            if "blocked" in error_msg:
+        except Exception as exc:
+            # The YubiKey's structured counter is authoritative. Exception
+            # wording is library/version dependent and must not drive state.
+            retries = self.get_retries_remaining()
+            if retries == 0:
                 raise PinBlockedError(
                     "PIN is blocked. Use PUK to unblock."
-                ) from e
-            
-            # Try to extract retry count from error message
-            retries = self._extract_retries(str(e))
-            
-            if retries is not None and retries == 0:
-                raise PinBlockedError(
-                    "PIN is blocked. Use PUK to unblock."
-                ) from e
-            
+                ) from exc
+
+            retries_remaining = retries if retries > 0 else None
+            if retries_remaining is None:
+                error_message = "Incorrect PIN."
+            else:
+                unit = "attempt" if retries_remaining == 1 else "attempts"
+                error_message = (
+                    f"Incorrect PIN. {retries_remaining} {unit} remaining."
+                )
+
             return PinResult(
                 success=False,
-                retries_remaining=retries,
-                error_message=f"Incorrect PIN. {retries} attempts remaining." if retries else "Incorrect PIN."
+                retries_remaining=retries_remaining,
+                error_message=error_message,
             )
     
     def get_retries_remaining(self) -> int:
@@ -181,29 +187,3 @@ class PinHandler:
         # The Authentication slot (9a) always requires PIN
         # Other slots may have different policies
         return True
-    
-    @staticmethod
-    def _extract_retries(error_message: str) -> Optional[int]:
-        """
-        Extract retry count from error message.
-        
-        Args:
-            error_message: The error message from a failed PIN verification.
-            
-        Returns:
-            Number of retries remaining, or None if not found.
-        """
-        import re
-        
-        # Common patterns for retry count in error messages
-        patterns = [
-            r'(\d+)\s*(?:retry|retries|attempt|attempts|try|tries)\s*(?:remaining|left)',
-            r'(?:retry|retries|attempt|attempts|try|tries)\s*(?:remaining|left)[:\s]*(\d+)',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, error_message, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-        
-        return None

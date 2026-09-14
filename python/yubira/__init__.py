@@ -23,6 +23,7 @@ from yubira.yubikey_connector import (
     YubiKeyConnector,
     YubiKeyInfo,
     YubiKeyConnectionError,
+    MultipleYubiKeysError,
     YubiKeyNotFoundError,
 )
 
@@ -65,6 +66,7 @@ __all__ = [
     "YubiKeyConnector",
     "YubiKeyInfo",
     "YubiKeyConnectionError",
+    "MultipleYubiKeysError",
     "YubiKeyNotFoundError",
     "CertificateReader",
     "CertificateInfo",

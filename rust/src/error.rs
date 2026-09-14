@@ -43,12 +43,16 @@ pub enum YubiraError {
     PinError(String),
     /// Certificate has expired.
     CertificateExpired(String),
+    /// Certificate validity period has not started.
+    CertificateNotYetValid(String),
     /// IAM Roles Anywhere API error.
     Api(String),
     /// Network error.
     Network(String),
     /// Signing error.
     Signing(String),
+    /// Invalid or inconsistent CLI configuration.
+    InvalidConfiguration(String),
     /// Invalid slot.
     InvalidSlot(String),
 }
@@ -61,8 +65,10 @@ impl YubiraError {
             Self::ConnectionFailed(_) => ExitCode::ConnectionFailed,
             Self::NoCertificate(_) | Self::InvalidSlot(_) => ExitCode::NoCertificate,
             Self::PinError(_) => ExitCode::PinError,
-            Self::CertificateExpired(_) => ExitCode::CertificateExpired,
-            Self::Api(_) | Self::Signing(_) => ExitCode::ApiError,
+            Self::CertificateExpired(_) | Self::CertificateNotYetValid(_) => {
+                ExitCode::CertificateExpired
+            }
+            Self::Api(_) | Self::Signing(_) | Self::InvalidConfiguration(_) => ExitCode::ApiError,
             Self::Network(_) => ExitCode::NetworkError,
         }
     }
@@ -76,9 +82,13 @@ impl fmt::Display for YubiraError {
             Self::NoCertificate(msg) => write!(f, "{msg}"),
             Self::PinError(msg) => write!(f, "{msg}"),
             Self::CertificateExpired(date) => write!(f, "Certificate expired on {date}."),
+            Self::CertificateNotYetValid(date) => {
+                write!(f, "Certificate is not valid before {date}.")
+            }
             Self::Api(msg) => write!(f, "CreateSession failed: {msg}"),
             Self::Network(msg) => write!(f, "Network error: {msg}"),
             Self::Signing(msg) => write!(f, "Signing failed: {msg}"),
+            Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
             Self::InvalidSlot(msg) => write!(f, "{msg}"),
         }
     }
@@ -129,6 +139,18 @@ mod tests {
     #[test]
     fn test_exit_code_api_error() {
         let err = YubiraError::Api("bad request".into());
+        assert_eq!(err.exit_code() as u8, 6);
+    }
+
+    #[test]
+    fn test_exit_code_certificate_not_yet_valid() {
+        let err = YubiraError::CertificateNotYetValid("2030-01-01".into());
+        assert_eq!(err.exit_code() as u8, 5);
+    }
+
+    #[test]
+    fn test_exit_code_invalid_configuration() {
+        let err = YubiraError::InvalidConfiguration("bad region".into());
         assert_eq!(err.exit_code() as u8, 6);
     }
 
@@ -184,6 +206,21 @@ mod tests {
     fn test_display_invalid_slot() {
         let err = YubiraError::InvalidSlot("bad slot".into());
         assert_eq!(format!("{err}"), "bad slot");
+    }
+
+    #[test]
+    fn test_display_certificate_not_yet_valid() {
+        let err = YubiraError::CertificateNotYetValid("2030-01-01".into());
+        assert_eq!(
+            format!("{err}"),
+            "Certificate is not valid before 2030-01-01."
+        );
+    }
+
+    #[test]
+    fn test_display_invalid_configuration() {
+        let err = YubiraError::InvalidConfiguration("bad region".into());
+        assert_eq!(format!("{err}"), "Invalid configuration: bad region");
     }
 
     #[test]

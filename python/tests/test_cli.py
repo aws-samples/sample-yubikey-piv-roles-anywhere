@@ -40,6 +40,7 @@ from yubira.cli import (
     EXIT_CONNECTION_FAILED,
     EXIT_NO_CERTIFICATE,
     EXIT_PIN_ERROR,
+    EXIT_CERTIFICATE_EXPIRED,
     EXIT_API_ERROR,
     EXIT_NETWORK_ERROR,
 )
@@ -200,6 +201,25 @@ class TestArgumentParsing:
         
         assert args.session_duration == 7200
 
+    def test_certificate_chain_is_optional(self):
+        parser = init_argparse()
+        args = parser.parse_args([
+            "--trust-anchor-arn", "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc",
+            "--profile-arn", "arn:aws:rolesanywhere:us-east-1:123456789012:profile/def",
+            "--role-arn", "arn:aws:iam::123456789012:role/MyRole",
+        ])
+        assert args.certificate_chain is None
+
+    def test_certificate_chain_path_is_accepted(self):
+        parser = init_argparse()
+        args = parser.parse_args([
+            "--trust-anchor-arn", "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc",
+            "--profile-arn", "arn:aws:rolesanywhere:us-east-1:123456789012:profile/def",
+            "--role-arn", "arn:aws:iam::123456789012:role/MyRole",
+            "--certificate-chain", "intermediates.pem",
+        ])
+        assert args.certificate_chain == "intermediates.pem"
+
 
 class TestExitCodes:
     """Tests for CLI exit codes."""
@@ -338,3 +358,158 @@ class TestJSONOutput:
         assert parsed.year == 2024
         assert parsed.month == 12
         assert parsed.day == 31
+
+
+class TestErrorRedaction:
+    """Internal exception text must not cross the CLI stderr boundary."""
+
+    CLI_ARGS = [
+        "yubira",
+        "--trust-anchor-arn",
+        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/example",
+        "--profile-arn",
+        "arn:aws:rolesanywhere:us-east-1:123456789012:profile/example",
+        "--role-arn",
+        "arn:aws:iam::123456789012:role/ExampleRole",
+    ]
+    SENSITIVE_DETAIL = "synthetic-sensitive-internal-detail"
+
+    def _invoke(self, connector, *patches):
+        from contextlib import ExitStack
+
+        stderr_capture = StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", self.CLI_ARGS))
+            stack.enter_context(
+                patch("yubira.cli.YubiKeyConnector", return_value=connector)
+            )
+            stack.enter_context(patch("sys.stderr", stderr_capture))
+            for patcher in patches:
+                stack.enter_context(patcher)
+            exc_info = stack.enter_context(pytest.raises(SystemExit))
+            main()
+        return exc_info.value.code, stderr_capture.getvalue()
+
+    def test_connection_error_details_are_redacted(self):
+        from yubira import YubiKeyConnectionError
+
+        connector = MagicMock()
+        connector.connect.side_effect = YubiKeyConnectionError(self.SENSITIVE_DETAIL)
+
+        code, stderr = self._invoke(connector)
+
+        assert code == EXIT_CONNECTION_FAILED
+        assert stderr == "Error: Failed to connect to YubiKey.\n"
+        assert self.SENSITIVE_DETAIL not in stderr
+
+    def test_certificate_error_details_are_redacted(self):
+        from yubira import CertificateReadError
+
+        connector = MagicMock()
+        reader = MagicMock()
+        reader.read_certificate.side_effect = CertificateReadError(self.SENSITIVE_DETAIL)
+
+        code, stderr = self._invoke(
+            connector,
+            patch("yubira.cli.CertificateReader", return_value=reader),
+        )
+
+        assert code == EXIT_NO_CERTIFICATE
+        assert stderr == "Error: Failed to read certificate.\n"
+        assert self.SENSITIVE_DETAIL not in stderr
+
+    @pytest.mark.parametrize(
+        ("exception_type", "expected_code", "expected_message"),
+        [
+            ("signing", EXIT_API_ERROR, "Error: Signing failed.\n"),
+            ("api", EXIT_API_ERROR, "Error: CreateSession request failed.\n"),
+            ("network", EXIT_NETWORK_ERROR, "Error: Network request failed.\n"),
+        ],
+    )
+    def test_session_error_details_are_redacted(
+        self, exception_type, expected_code, expected_message
+    ):
+        from yubira import SigningError, RolesAnywhereAPIError, RolesAnywhereNetworkError
+
+        exceptions = {
+            "signing": SigningError(self.SENSITIVE_DETAIL),
+            "api": RolesAnywhereAPIError(self.SENSITIVE_DETAIL),
+            "network": RolesAnywhereNetworkError(self.SENSITIVE_DETAIL),
+        }
+        connector = MagicMock()
+        cert_info = MagicMock()
+        cert_info.is_expired = False
+        reader = MagicMock()
+        reader.read_certificate.return_value = cert_info
+        pin_handler = MagicMock()
+        pin_handler.is_pin_required.return_value = False
+        client = MagicMock()
+        client.create_session.side_effect = exceptions[exception_type]
+
+        code, stderr = self._invoke(
+            connector,
+            patch("yubira.cli.CertificateReader", return_value=reader),
+            patch("yubira.cli.PinHandler", return_value=pin_handler),
+            patch("yubira.cli.RolesAnywhereClient", return_value=client),
+        )
+
+        assert code == expected_code
+        assert stderr == expected_message
+        assert self.SENSITIVE_DETAIL not in stderr
+
+    def test_unexpected_error_details_are_redacted(self):
+        connector = MagicMock()
+        connector.get_piv_session.side_effect = RuntimeError(self.SENSITIVE_DETAIL)
+
+        code, stderr = self._invoke(connector)
+
+        assert code == EXIT_API_ERROR
+        assert stderr == "Error: Unexpected internal error.\n"
+        assert self.SENSITIVE_DETAIL not in stderr
+
+    def test_invalid_configuration_is_rejected_before_token_access(self):
+        args = [*self.CLI_ARGS, "--region", "x/"]
+        stderr_capture = StringIO()
+        with (
+            patch.object(sys, "argv", args),
+            patch("yubira.cli.YubiKeyConnector") as connector_class,
+            patch("sys.stderr", stderr_capture),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == EXIT_API_ERROR
+        assert "Invalid configuration: region has invalid syntax" in stderr_capture.getvalue()
+        connector_class.assert_not_called()
+
+    def test_multiple_tokens_require_optional_serial_parameter(self):
+        from yubira import MultipleYubiKeysError
+
+        connector = MagicMock()
+        connector.connect.side_effect = MultipleYubiKeysError("untrusted detail")
+
+        code, stderr = self._invoke(connector)
+
+        assert code == EXIT_CONNECTION_FAILED
+        assert stderr == "Error: Multiple YubiKeys detected. Specify --serial.\n"
+        assert "untrusted detail" not in stderr
+
+    def test_not_yet_valid_certificate_is_rejected_before_pin(self):
+        connector = MagicMock()
+        cert_info = MagicMock()
+        cert_info.is_expired = False
+        cert_info.is_not_yet_valid = True
+        cert_info.not_before = datetime(2030, 1, 2, tzinfo=timezone.utc)
+        reader = MagicMock()
+        reader.read_certificate.return_value = cert_info
+        pin_handler_class = MagicMock()
+
+        code, stderr = self._invoke(
+            connector,
+            patch("yubira.cli.CertificateReader", return_value=reader),
+            patch("yubira.cli.PinHandler", pin_handler_class),
+        )
+
+        assert code == EXIT_CERTIFICATE_EXPIRED
+        assert stderr == "Error: Certificate is not valid before 2030-01-02.\n"
+        pin_handler_class.assert_not_called()

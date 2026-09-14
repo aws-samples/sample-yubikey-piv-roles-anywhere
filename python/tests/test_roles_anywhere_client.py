@@ -190,8 +190,8 @@ class TestRolesAnywhereClientHeaders:
     def test_build_headers_contains_host(self):
         """Test that headers contain Host."""
         client = RolesAnywhereClient(
-            trust_anchor_arn="arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc",
-            profile_arn="arn:aws:rolesanywhere:us-east-1:123456789012:profile/def",
+            trust_anchor_arn="arn:aws:rolesanywhere:us-west-2:123456789012:trust-anchor/abc",
+            profile_arn="arn:aws:rolesanywhere:us-west-2:123456789012:profile/def",
             role_arn="arn:aws:iam::123456789012:role/TestRole",
             region="us-west-2",
         )
@@ -288,6 +288,7 @@ class TestRolesAnywhereClientResponseParsing:
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "credentialSet": [{
+                "roleArn": "arn:aws:iam::123456789012:role/TestRole",
                 "credentials": {
                     "accessKeyId": "ASIAIOSFODNN7EXAMPLE",
                     "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",  # nosec B106 - fake test credential
@@ -357,6 +358,7 @@ class TestRolesAnywhereClientResponseParsing:
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "credentialSet": [{
+                "roleArn": "arn:aws:iam::123456789012:role/TestRole",
                 "credentials": {
                     "accessKeyId": "ASIAXXX",
                     # Missing secretAccessKey, sessionToken, expiration
@@ -376,7 +378,6 @@ class TestRolesAnywhereClientResponseParsing:
             profile_arn="arn:aws:rolesanywhere:us-east-1:123456789012:profile/def",
             role_arn="arn:aws:iam::123456789012:role/TestRole",
         )
-        
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.side_effect = json.JSONDecodeError("test", "doc", 0)
@@ -385,6 +386,31 @@ class TestRolesAnywhereClientResponseParsing:
             client._parse_response(mock_response)
         
         assert "Invalid JSON" in str(exc_info.value)
+
+    def test_parse_response_rejects_mismatched_role(self):
+        """Test credentials are bound to the requested role identity."""
+        client = RolesAnywhereClient(
+            trust_anchor_arn="arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc",
+            profile_arn="arn:aws:rolesanywhere:us-east-1:123456789012:profile/def",
+            role_arn="arn:aws:iam::123456789012:role/TestRole",
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "credentialSet": [{
+                "roleArn": "arn:aws:iam::123456789012:role/OtherRole",
+                "credentials": {
+                    "accessKeyId": "ASIAXXX",
+                    "secretAccessKey": "synthetic-secret",
+                    "sessionToken": "synthetic-token",
+                    "expiration": "2030-01-15T13:00:00Z",
+                },
+            }]
+        }
+
+        with pytest.raises(RolesAnywhereAPIError, match="does not match"):
+            client._parse_response(mock_response)
+
 
 
 class TestRolesAnywhereClientErrorHandling:
@@ -479,6 +505,7 @@ class TestRolesAnywhereClientErrorHandling:
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "credentialSet": [{
+                "roleArn": "arn:aws:iam::123456789012:role/TestRole",
                 "credentials": {
                     "accessKeyId": "ASIAXXX",
                     "secretAccessKey": "secretXXX",  # nosec B106 - fake test credential

@@ -48,6 +48,7 @@ class TestGetPin:
         with patch.dict(os.environ, {PinHandler.ENV_VAR: "123456"}):
             pin = handler.get_pin(source=PinSource.ENVIRONMENT)
             assert pin == "123456"
+            assert PinHandler.ENV_VAR not in os.environ
 
     def test_get_pin_raises_when_env_var_not_set(self):
         """Test that get_pin raises PinRequiredError when env var not set."""
@@ -82,6 +83,7 @@ class TestGetPin:
             pin, source = handler.get_pin_auto()
             assert pin == "env_pin"
             assert source == PinSource.ENVIRONMENT
+            assert PinHandler.ENV_VAR not in os.environ
 
     def test_get_pin_auto_falls_back_to_prompt(self):
         """Test that get_pin_auto prompts when env var not set."""
@@ -113,21 +115,27 @@ class TestVerifyPin:
         mock_session.verify_pin.assert_called_once_with("123456")
 
     def test_verify_pin_incorrect_with_retries(self):
-        """Test incorrect PIN returns failure with retry count."""
+        """Test incorrect PIN returns the structured hardware retry count."""
         mock_session = MagicMock()
-        mock_session.verify_pin.side_effect = Exception("Wrong PIN, 2 retries remaining")
+        mock_session.verify_pin.side_effect = Exception(
+            "opaque failure containing wrong_pin and 99 retries remaining"
+        )
+        mock_session.get_pin_attempts.return_value = 2
         handler = PinHandler(mock_session)
         
         result = handler.verify_pin("wrong_pin")
         
         assert result.success is False
         assert result.retries_remaining == 2
-        assert "Incorrect PIN" in result.error_message
+        assert result.error_message == "Incorrect PIN. 2 attempts remaining."
+        assert "wrong_pin" not in result.error_message
+        mock_session.get_pin_attempts.assert_called_once_with()
 
-    def test_verify_pin_blocked_raises_error(self):
-        """Test that blocked PIN raises PinBlockedError."""
+    def test_verify_pin_blocked_uses_structured_retry_count(self):
+        """Test that a zero hardware retry count raises PinBlockedError."""
         mock_session = MagicMock()
-        mock_session.verify_pin.side_effect = Exception("PIN is blocked")
+        mock_session.verify_pin.side_effect = Exception("opaque verification failure")
+        mock_session.get_pin_attempts.return_value = 0
         handler = PinHandler(mock_session)
         
         with pytest.raises(PinBlockedError) as exc_info:
@@ -135,14 +143,18 @@ class TestVerifyPin:
         
         assert "blocked" in str(exc_info.value).lower()
 
-    def test_verify_pin_zero_retries_raises_blocked(self):
-        """Test that zero retries remaining raises PinBlockedError."""
+    def test_verify_pin_unknown_retries_when_query_fails(self):
+        """Test that unavailable structured state is reported as unknown."""
         mock_session = MagicMock()
-        mock_session.verify_pin.side_effect = Exception("Wrong PIN, 0 retries remaining")
+        mock_session.verify_pin.side_effect = Exception("3 retries remaining")
+        mock_session.get_pin_attempts.side_effect = Exception("query unavailable")
         handler = PinHandler(mock_session)
-        
-        with pytest.raises(PinBlockedError):
-            handler.verify_pin("wrong_pin")
+
+        result = handler.verify_pin("wrong_pin")
+
+        assert result.success is False
+        assert result.retries_remaining is None
+        assert result.error_message == "Incorrect PIN."
 
 
 class TestRetryTracking:
@@ -169,21 +181,17 @@ class TestRetryTracking:
         
         assert retries == -1
 
-    def test_extract_retries_various_formats(self):
-        """Test retry extraction from various error message formats."""
-        # Test different message formats
-        test_cases = [
-            ("Wrong PIN, 3 retries remaining", 3),
-            ("2 attempts remaining", 2),
-            ("1 retry left", 1),
-            ("retries remaining: 5", 5),
-            ("attempts left: 4", 4),
-            ("No retry info here", None),
-        ]
-        
-        for message, expected in test_cases:
-            result = PinHandler._extract_retries(message)
-            assert result == expected, f"Failed for message: {message}"
+    def test_verify_pin_ignores_exception_retry_text(self):
+        """Test exception wording cannot override the structured counter."""
+        mock_session = MagicMock()
+        mock_session.verify_pin.side_effect = Exception("99 retries remaining")
+        mock_session.get_pin_attempts.return_value = 1
+        handler = PinHandler(mock_session)
+
+        result = handler.verify_pin("wrong_pin")
+
+        assert result.retries_remaining == 1
+        assert result.error_message == "Incorrect PIN. 1 attempt remaining."
 
 
 class TestPinRequired:

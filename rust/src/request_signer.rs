@@ -194,7 +194,8 @@ fn uri_encode_path(uri: &str) -> String {
             if segment.is_empty() {
                 String::new()
             } else {
-                utf8_percent_encode(segment, URI_ENCODE_SET).to_string()
+                let encoded_once = utf8_percent_encode(segment, URI_ENCODE_SET).to_string();
+                utf8_percent_encode(&encoded_once, URI_ENCODE_SET).to_string()
             }
         })
         .collect::<Vec<_>>()
@@ -206,22 +207,22 @@ fn create_canonical_query_string(query_string: &str) -> String {
         return String::new();
     }
 
-    let mut params: Vec<(&str, &str)> = query_string
+    let mut params: Vec<(String, String)> = query_string
         .split('&')
         .map(|param| {
-            if let Some((k, v)) = param.split_once('=') {
-                (k, v)
-            } else {
-                (param, "")
-            }
+            let (key, value) = param.split_once('=').unwrap_or((param, ""));
+            let canonical_value = value
+                .replace("%3D", "%253D")
+                .replace("%3d", "%253D")
+                .replace('=', "%253D");
+            (key.to_string(), canonical_value)
         })
         .collect();
 
-    params.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
+    params.sort();
     params
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -345,7 +346,10 @@ mod tests {
 
     #[test]
     fn test_uri_encode_path_with_special_chars() {
-        assert_eq!(uri_encode_path("/path with spaces"), "/path%20with%20spaces");
+        assert_eq!(
+            uri_encode_path("/path with spaces"),
+            "/path%2520with%2520spaces"
+        );
     }
 
     #[test]
@@ -459,5 +463,104 @@ mod tests {
             KeyType::EcP256, "999", &ts, "eu-west-1", "host", &[0x01],
         );
         assert!(auth.starts_with("AWS4-X509-ECDSA-SHA256 "));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SigningVectorDocument {
+        schema_version: u32,
+        vectors: Vec<SigningVector>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SigningVector {
+        name: String,
+        method: String,
+        uri: String,
+        query_string: String,
+        headers: BTreeMap<String, String>,
+        body: String,
+        timestamp: String,
+        region: String,
+        key_type: String,
+        expected: SigningVectorExpected,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SigningVectorExpected {
+        canonical_uri: String,
+        canonical_query: String,
+        payload_hash: String,
+        signed_headers: String,
+        canonical_request: String,
+        string_to_sign: String,
+    }
+
+    #[test]
+    fn test_shared_roles_anywhere_signing_vectors() {
+        let document: SigningVectorDocument = serde_json::from_str(include_str!(
+            "../../test-vectors/roles-anywhere-signing.json"
+        ))
+        .expect("shared signing vectors must be valid JSON");
+        assert_eq!(document.schema_version, 1);
+
+        for vector in document.vectors {
+            let key_type = match vector.key_type.as_str() {
+                "rsa" => KeyType::Rsa,
+                "ec256" => KeyType::EcP256,
+                "ec384" => KeyType::EcP384,
+                other => panic!("unsupported vector key type: {other}"),
+            };
+            let timestamp = DateTime::parse_from_rfc3339(&vector.timestamp)
+                .expect("vector timestamp must be RFC 3339")
+                .with_timezone(&Utc);
+            let payload_hash = hash_payload(vector.body.as_bytes());
+            let canonical_request = create_canonical_request(
+                &vector.method,
+                &vector.uri,
+                &vector.query_string,
+                &vector.headers,
+                &payload_hash,
+            );
+            let string_to_sign = create_string_to_sign(
+                key_type,
+                &timestamp,
+                &vector.region,
+                &canonical_request,
+            );
+
+            assert_eq!(
+                uri_encode_path(&vector.uri),
+                vector.expected.canonical_uri,
+                "{} canonical URI",
+                vector.name
+            );
+            assert_eq!(
+                create_canonical_query_string(&vector.query_string),
+                vector.expected.canonical_query,
+                "{} canonical query",
+                vector.name
+            );
+            assert_eq!(
+                payload_hash, vector.expected.payload_hash,
+                "{} payload hash",
+                vector.name
+            );
+            assert_eq!(
+                get_signed_headers(&vector.headers),
+                vector.expected.signed_headers,
+                "{} signed headers",
+                vector.name
+            );
+            assert_eq!(
+                canonical_request, vector.expected.canonical_request,
+                "{} canonical request",
+                vector.name
+            );
+            assert_eq!(
+                string_to_sign, vector.expected.string_to_sign,
+                "{} string to sign",
+                vector.name
+            );
+        }
     }
 }

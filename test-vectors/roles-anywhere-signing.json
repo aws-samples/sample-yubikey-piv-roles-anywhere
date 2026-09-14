@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "name": "roles-anywhere-rsa-basic",
+      "method": "POST",
+      "uri": "/sessions",
+      "query_string": "profileArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Aprofile%2FEXAMPLE&roleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FExampleRole&trustAnchorArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Atrust-anchor%2FEXAMPLE",
+      "headers": {
+        "content-length": "24",
+        "content-type": "application/json",
+        "host": "rolesanywhere.us-east-1.amazonaws.com",
+        "x-amz-date": "20260312T103000Z",
+        "x-amz-x509": "VEVTVA=="
+      },
+      "body": "{\"durationSeconds\":3600}",
+      "timestamp": "2026-03-12T10:30:00Z",
+      "region": "us-east-1",
+      "key_type": "rsa",
+      "expected": {
+        "canonical_uri": "/sessions",
+        "canonical_query": "profileArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Aprofile%2FEXAMPLE&roleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FExampleRole&trustAnchorArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Atrust-anchor%2FEXAMPLE",
+        "payload_hash": "1a15f67f6619aa540b13e9a4c37d149fb2c9bdea25d82b73a3878826694dfe27",
+        "signed_headers": "content-length;content-type;host;x-amz-date;x-amz-x509",
+        "canonical_request": "POST\n/sessions\nprofileArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Aprofile%2FEXAMPLE&roleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FExampleRole&trustAnchorArn=arn%3Aaws%3Arolesanywhere%3Aus-east-1%3A123456789012%3Atrust-anchor%2FEXAMPLE\ncontent-length:24\ncontent-type:application/json\nhost:rolesanywhere.us-east-1.amazonaws.com\nx-amz-date:20260312T103000Z\nx-amz-x509:VEVTVA==\n\ncontent-length;content-type;host;x-amz-date;x-amz-x509\n1a15f67f6619aa540b13e9a4c37d149fb2c9bdea25d82b73a3878826694dfe27",
+        "string_to_sign": "AWS4-X509-RSA-SHA256\n20260312T103000Z\n20260312/us-east-1/rolesanywhere/aws4_request\n175c0d4f37c0b5bc1ff3276af9da3c12d73d1405018a442e7bcbf096e84b3dda"
+      }
+    },
+    {
+      "name": "double-encoded-path-ecdsa",
+      "method": "GET",
+      "uri": "/path with spaces/%2F/ümlaut",
+      "query_string": "",
+      "headers": {
+        "host": "example.amazonaws.com",
+        "x-amz-date": "20260704T010203Z",
+        "x-test": "  value   with spaces  "
+      },
+      "body": "",
+      "timestamp": "2026-07-04T01:02:03Z",
+      "region": "eu-west-1",
+      "key_type": "ec256",
+      "expected": {
+        "canonical_uri": "/path%2520with%2520spaces/%25252F/%25C3%25BCmlaut",
+        "canonical_query": "",
+        "payload_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "signed_headers": "host;x-amz-date;x-test",
+        "canonical_request": "GET\n/path%2520with%2520spaces/%25252F/%25C3%25BCmlaut\n\nhost:example.amazonaws.com\nx-amz-date:20260704T010203Z\nx-test:value with spaces\n\nhost;x-amz-date;x-test\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "string_to_sign": "AWS4-X509-ECDSA-SHA256\n20260704T010203Z\n20260704/eu-west-1/rolesanywhere/aws4_request\ne48151ca677679edeacc2d008fa32a8b38269c09b87052a5fd7dc22c985883b5"
+      }
+    },
+    {
+      "name": "encoded-equals-duplicate-query",
+      "method": "GET",
+      "uri": "sessions",
+      "query_string": "z=last&a=value%3Dwith%3Dequals&a=first&empty",
+      "headers": {
+        "host": "example.amazonaws.com",
+        "x-amz-date": "20261231T235959Z"
+      },
+      "body": "",
+      "timestamp": "2026-12-31T23:59:59Z",
+      "region": "ap-southeast-2",
+      "key_type": "ec384",
+      "expected": {
+        "canonical_uri": "/sessions",
+        "canonical_query": "a=first&a=value%253Dwith%253Dequals&empty=&z=last",
+        "payload_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "signed_headers": "host;x-amz-date",
+        "canonical_request": "GET\n/sessions\na=first&a=value%253Dwith%253Dequals&empty=&z=last\nhost:example.amazonaws.com\nx-amz-date:20261231T235959Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "string_to_sign": "AWS4-X509-ECDSA-SHA256\n20261231T235959Z\n20261231/ap-southeast-2/rolesanywhere/aws4_request\n557b5d0d455b013dd8ab7b3fe03576f2e5f8d8c663f7d7dca054cd99b711b19d"
+      }
+    }
+  ]
+}

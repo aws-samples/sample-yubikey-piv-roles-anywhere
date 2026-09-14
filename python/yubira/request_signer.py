@@ -24,7 +24,7 @@ from urllib.parse import quote
 import hashlib
 
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
+from cryptography.hazmat.primitives.asymmetric import padding
 from yubikit.piv import PivSession, SLOT, KEY_TYPE
 
 
@@ -92,28 +92,42 @@ class RequestSigner:
             return self._cached_algorithm
         
         try:
-            # Get the certificate to determine key type
             cert = self._session.get_certificate(self._slot)
             if cert is None:
                 raise SigningError(f"No certificate found in slot {self._slot}")
-            
-            public_key = cert.public_key()
-            
-            if isinstance(public_key, rsa.RSAPublicKey):
+
+            self._key_type = self._get_supported_key_type(cert.public_key())
+            if self._key_type == KEY_TYPE.RSA2048:
                 self._cached_algorithm = "RSA-SHA256"
-            elif isinstance(public_key, ec.EllipticCurvePublicKey):
-                # IAM Roles Anywhere only accepts SHA256 digests, even for P-384 keys.
-                # The signing algorithm is always ECDSA-SHA256 regardless of curve size.
-                self._cached_algorithm = "ECDSA-SHA256"
             else:
-                raise SigningError(f"Unsupported key type: {type(public_key)}")
-            
+                # IAM Roles Anywhere requires SHA-256 for both supported EC curves.
+                self._cached_algorithm = "ECDSA-SHA256"
+
             return self._cached_algorithm
-            
         except SigningError:
             raise
         except Exception as e:
             raise SigningError(f"Failed to determine signature algorithm: {e}") from e
+
+    @staticmethod
+    def _get_supported_key_type(public_key) -> KEY_TYPE:
+        """Return the stable cross-language PIV key type or fail closed."""
+        try:
+            key_type = KEY_TYPE.from_public_key(public_key)
+        except ValueError as e:
+            raise SigningError(str(e)) from e
+
+        if key_type == KEY_TYPE.RSA2048:
+            return key_type
+        if key_type in (KEY_TYPE.RSA1024, KEY_TYPE.RSA3072, KEY_TYPE.RSA4096):
+            raise SigningError(
+                f"Unsupported RSA key size: {public_key.key_size}. "
+                "Yubira currently supports RSA-2048; use P-384 for a "
+                "higher-strength cross-language configuration."
+            )
+        if key_type in (KEY_TYPE.ECCP256, KEY_TYPE.ECCP384):
+            return key_type
+        raise SigningError(f"Unsupported key type: {type(public_key).__name__}")
 
     def create_canonical_request(
         self,
@@ -185,13 +199,15 @@ class RequestSigner:
         if not uri.startswith("/"):
             uri = "/" + uri
         
-        # URI-encode each path segment, preserving '/'
+        # IAM Roles Anywhere requires each non-empty path segment to be
+        # URI-encoded twice. The second pass encodes percent signs emitted by
+        # the first pass while preserving RFC 3986 unreserved characters.
         segments = uri.split("/")
         encoded_segments = []
         for segment in segments:
             if segment:
-                # Use quote with safe='' to encode everything except unreserved chars
-                encoded_segments.append(quote(segment, safe="-_.~"))
+                encoded_once = quote(segment, safe="-_.~")
+                encoded_segments.append(quote(encoded_once, safe="-_.~"))
             else:
                 encoded_segments.append("")
         
@@ -199,33 +215,31 @@ class RequestSigner:
     
     def _create_canonical_query_string(self, query_string: str) -> str:
         """
-        Create canonical query string (sorted by parameter name).
-        
-        The query string is expected to already be URL-encoded.
-        This function sorts the parameters but does NOT re-encode them.
-        
-        Args:
-            query_string: URL-encoded query string without leading '?'.
-            
-        Returns:
-            Canonical query string with sorted parameters.
+        Create a canonical query string from an already URL-encoded query.
+
+        Parameters are sorted by encoded name and value. IAM Roles Anywhere
+        additionally requires equals signs in parameter values to be encoded
+        twice, so both raw ``=`` and existing ``%3D`` forms become ``%253D``.
         """
         if not query_string:
             return ""
         
-        # Parse query parameters (already URL-encoded)
         params = []
         for param in query_string.split("&"):
             if "=" in param:
                 key, value = param.split("=", 1)
             else:
                 key, value = param, ""
-            params.append((key, value))
-        
-        # Sort by key, then by value (lexicographically on encoded values)
-        params.sort(key=lambda x: (x[0], x[1]))
-        
-        return "&".join(f"{k}={v}" for k, v in params)
+
+            canonical_value = (
+                value.replace("%3D", "%253D")
+                .replace("%3d", "%253D")
+                .replace("=", "%253D")
+            )
+            params.append((key, canonical_value))
+
+        params.sort(key=lambda item: (item[0], item[1]))
+        return "&".join(f"{key}={value}" for key, value in params)
     
     def _create_canonical_headers(self, headers: dict[str, str]) -> tuple[str, str]:
         """
@@ -323,32 +337,23 @@ class RequestSigner:
             SigningError: If signing fails.
         """
         try:
-            algorithm = self.get_signature_algorithm()
-            
-            # IAM Roles Anywhere requires SHA256 for all key types
+            self.get_signature_algorithm()
+            key_type = self._key_type
+            if key_type is None:
+                raise SigningError("Signing key type was not initialized")
+
+            # IAM Roles Anywhere requires SHA-256 for all supported key types.
             hash_alg = hashes.SHA256()
-            
-            # Get the slot's metadata to determine key type
-            cert = self._session.get_certificate(self._slot)
-            public_key = cert.public_key()
-            
-            if isinstance(public_key, rsa.RSAPublicKey):
-                # RSA signing with PKCS#1 v1.5 padding
+
+            if key_type == KEY_TYPE.RSA2048:
                 signature = self._session.sign(
                     self._slot,
-                    KEY_TYPE.RSA2048,  # Will be determined by actual key
+                    key_type,
                     data,
                     hash_alg,
                     padding.PKCS1v15()
                 )
-            elif isinstance(public_key, ec.EllipticCurvePublicKey):
-                # ECDSA signing
-                curve_name = public_key.curve.name
-                if curve_name in ("secp384r1", "prime384v1"):
-                    key_type = KEY_TYPE.ECCP384
-                else:
-                    key_type = KEY_TYPE.ECCP256
-                
+            elif key_type in (KEY_TYPE.ECCP256, KEY_TYPE.ECCP384):
                 signature = self._session.sign(
                     self._slot,
                     key_type,
@@ -356,8 +361,8 @@ class RequestSigner:
                     hash_alg,
                 )
             else:
-                raise SigningError(f"Unsupported key type: {type(public_key)}")
-            
+                raise SigningError(f"Unsupported PIV key type: {key_type}")
+
             return signature
             
         except SigningError:

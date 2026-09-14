@@ -12,7 +12,7 @@ Available in two implementations:
 - **AWS credential process integration**: Works seamlessly with AWS CLI and SDKs
 - **Multiple YubiKey support**: Select specific device by serial number
 - **Flexible slot selection**: Use any PIV slot (9a, 9c, 9d, 9e)
-- **RSA and ECDSA support**: Works with both key types
+- **RSA-2048 and ECDSA support**: Supports RSA-2048, P-256, and P-384 consistently in both implementations; RSA-1024/3072/4096 are rejected until stable Rust driver support is available
 
 ## Prerequisites
 
@@ -24,8 +24,10 @@ Available in two implementations:
   - Profile (defines the IAM role and policies)
   - IAM Role (the role to assume)
 
+> Before using Yubira for production or emergency access, complete the [Security Deployment Guide](docs/security-deployment.md). Hardware-backed keys do not replace least-privilege IAM trust, certificate lifecycle/revocation, monitoring, and a tested break-glass procedure.
+
 ### Python
-- Python 3.10+
+- Python 3.13+
 
 ### Rust
 - Rust 1.70+ (install via [rustup](https://rustup.rs))
@@ -54,7 +56,7 @@ pip install -e .
 cd rust
 
 # Build release binary
-cargo build --release
+cargo build --release --locked
 
 # The binary will be at rust/target/release/yubira (or yubira.exe on Windows)
 ```
@@ -64,7 +66,7 @@ Optionally install it system-wide:
 ```bash
 cd rust
 
-cargo install --path .
+cargo install --path . --locked
 ```
 
 After installation, the `yubira` command will be available in your PATH.
@@ -88,13 +90,16 @@ yubira \
 | `--trust-anchor-arn` | ARN of the IAM Roles Anywhere trust anchor | Required |
 | `--profile-arn` | ARN of the IAM Roles Anywhere profile | Required |
 | `--role-arn` | ARN of the IAM role to assume | Required |
-| `--region` | AWS region | us-east-1 |
+| `--region` | Commercial AWS or GovCloud region matching the Roles Anywhere ARNs | us-east-1 |
 | `--slot` | PIV slot containing the certificate | 9a |
-| `--serial` | YubiKey serial number (for multiple devices) | Auto-detect |
-| `--session-duration` | Session duration in seconds | 3600 |
-| `--debug` | Print request details to stderr for troubleshooting | Off |
+| `--serial` | YubiKey serial number; optional with one device, required when multiple are connected | Auto-select one device |
+| `--certificate-chain` | Optional PEM bundle of up to five certificates, ordered from the leaf issuer toward the trust anchor | None |
+| `--session-duration` | Session duration in seconds (900–43200) | 3600 |
+| `--debug` | Print redacted diagnostic metadata and non-replayable hashes to stderr | Off |
 
 ### AWS CLI Integration
+
+Before accessing the YubiKey, both implementations validate region syntax, the 900–43200 second duration, ARN services/resources/accounts/partitions, trust-anchor/profile coherence, and supported commercial AWS or GovCloud partition mapping. Cross-account target roles remain supported when partitions match. Unsupported partitions fail closed. Successful credentials are accepted only when the returned `roleArn` exactly matches the requested role.
 
 Configure your AWS credentials file to use Yubira as a credential process.
 
@@ -137,6 +142,14 @@ aws sts get-caller-identity --profile yubikey
 If you have multiple YubiKeys, specify the serial number:
 
 ```ini
+
+For a leaf certificate issued through intermediates, provide a PEM bundle ordered from the leaf issuer toward the configured trust anchor:
+
+```ini
+credential_process = yubira --trust-anchor-arn <TRUST_ANCHOR_ARN> --profile-arn <PROFILE_ARN> --role-arn <ROLE_ARN> --certificate-chain /path/to/intermediates.pem
+```
+
+The option accepts at most five certificates and a 64 KiB file. Yubira rejects malformed, duplicate, or incorrectly ordered chains. It sends the bundle as signed, comma-delimited base64 DER in `X-Amz-X509-Chain`; omit the option when the leaf chains directly to the trust anchor.
 [yubikey-work]
 credential_process = yubira.exe --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc123 --profile-arn arn:aws:rolesanywhere:us-east-1:123456789012:profile/def456 --role-arn arn:aws:iam::123456789012:role/MyRole --serial 12345678
 ```
@@ -166,6 +179,8 @@ Yubira supports two methods for PIN entry:
    export YUBIKEY_PIV_PIN=123456
    aws s3 ls --profile yubikey
    ```
+
+The child Yubira process consumes and removes its own `YUBIKEY_PIV_PIN` environment entry before verification so later child processes cannot inherit it. This does not remove the value from the invoking shell or AWS process, or erase environment snapshots captured before removal. Unset the variable in the caller as soon as the noninteractive operation finishes, and do not use a long-lived globally exported PIN.
 
 2. **Interactive prompt**: If no environment variable is set, you'll be prompted
 
@@ -222,10 +237,10 @@ python -m pytest tests/properties/ -v
 
 ```bash
 cd rust
-cargo test
+cargo test --locked
 ```
 
-74 tests cover error handling, slot parsing, SigV4 request signing, canonical request construction, credential output formatting, and API response parsing. Hardware-dependent code (YubiKey operations) requires a physical device and is not covered by unit tests.
+112 tests cover error handling, optional bounded certificate chains, input validation, unambiguous token selection, certificate validity and exact EC curve allowlisting, PIN environment consumption/zeroization and structured retry state, slot parsing, SigV4 request signing, canonical request construction, credential output formatting, and API response parsing. Hardware-dependent code (YubiKey operations) requires a physical device and is not covered by unit tests.
 
 #### Building
 
@@ -233,10 +248,18 @@ cargo test
 cd rust
 
 # Debug build
-cargo build
+cargo build --locked
 
 # Release build (optimized)
-cargo build --release
+cargo build --release --locked
+```
+
+All normal Rust build, test, and installation commands use `--locked` so a stale `Cargo.lock` fails instead of being updated implicitly. For a network-isolated release after dependencies have been fetched:
+
+```bash
+cd rust
+cargo fetch --locked
+cargo build --release --frozen
 ```
 
 #### Project Structure
@@ -245,6 +268,8 @@ cargo build --release
 rust/src/
 ├── main.rs                  # CLI entry point (clap)
 ├── error.rs                 # Error types and exit codes
+├── input_validation.rs      # Region, ARN, partition, and duration validation
+├── certificate_chain.rs     # Optional bounded intermediate-chain handling
 ├── certificate_reader.rs    # X.509 certificate reading from PIV slots
 ├── pin_handler.rs           # PIN entry (env var or interactive prompt)
 ├── request_signer.rs        # AWS SigV4-X509 request signing
@@ -258,7 +283,8 @@ rust/src/
 |-------|---------|
 | `yubikey` | PIV operations (certificate read, PIN verify, signing) |
 | `x509-cert`, `der` | X.509 certificate parsing |
-| `sha2`, `p256`, `p384`, `rsa` | Cryptographic operations |
+| `sha2`, `pkcs1` | Request hashing and public RSA modulus inspection |
+| `p256`, `p384`, `rsa` | Transitive cryptography used by stable `yubikey 0.8.0` |
 | `ureq` | Blocking HTTP client |
 | `clap` | CLI argument parsing |
 | `chrono` | Timestamp handling |

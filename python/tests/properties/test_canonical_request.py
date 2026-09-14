@@ -35,9 +35,10 @@ from yubira.request_signer import RequestSigner
 # Strategy for HTTP methods
 http_method_strategy = st.sampled_from(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
 
-# Strategy for URI path segments (alphanumeric and common path chars)
+# Strategy for URI path segments, including characters that require one or
+# two URI-encoding passes and representative non-ASCII input.
 path_segment_strategy = st.text(
-    alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="-_"),
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~ %:ü",
     min_size=1,
     max_size=20,
 )
@@ -76,17 +77,34 @@ payload_hash_strategy = st.binary(min_size=1, max_size=100).map(
     lambda b: hashlib.sha256(b).hexdigest()
 )
 
-# Strategy for query string parameters
-query_param_strategy = st.tuples(
-    st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=10),
-    st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=0, max_size=20),
+# Strategy for already URL-encoded query parameters. Include percent escapes,
+# ARN punctuation encodings, and encoded equals signs while excluding raw '&'.
+query_key_strategy = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~%",
+    min_size=1,
+    max_size=12,
 )
+query_value_strategy = st.one_of(
+    st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~%",
+        min_size=0,
+        max_size=24,
+    ),
+    st.sampled_from(
+        [
+            "value%3Dwith%3Dequals",
+            "arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FExample",
+            "%C3%BCmlaut",
+        ]
+    ),
+)
+query_param_strategy = st.tuples(query_key_strategy, query_value_strategy)
 
 query_string_strategy = st.lists(
     query_param_strategy,
     min_size=0,
     max_size=5,
-).map(lambda params: "&".join(f"{k}={v}" for k, v in params) if params else "")
+).map(lambda params: "&".join(f"{key}={value}" for key, value in params))
 
 
 def create_mock_signer() -> RequestSigner:

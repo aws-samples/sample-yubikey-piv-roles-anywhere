@@ -1,10 +1,27 @@
 # Gitleaks configuration
-# Allowlist false positives from test files using AWS example credentials
+# Extend the built-in detector set, then allow only exact public AWS
+# documentation fixture values. Source and test files remain fully scanned.
 
-[allowlist]
-  description = "Test files using AWS documentation example credentials"
-  paths = [
-    '''rust/src/roles_anywhere_client\.rs''',
-    '''python/tests/test_roles_anywhere_client\.py''',
-    '''\.gitleaksignore''',
-  ]
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "AWS documentation example credentials"
+regexTarget = "match"
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''ASIAIOSFODNN7EXAMPLE''',
+  '''wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY''',
+]
+
+[[allowlists]]
+description = "Gitleaks fingerprint file self-reference"
+paths = [
+  '''^\.gitleaksignore$''',
+]
+
+[[allowlists]]
+description = "Generated Rust build artifacts"
+paths = [
+  '''(^|/)rust/target/''',
+]

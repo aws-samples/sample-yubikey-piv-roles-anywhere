@@ -17,7 +17,7 @@
 //! Certificate reader for X.509 certificates from YubiKey PIV slots.
 
 use chrono::{DateTime, Utc};
-use der::Encode;
+use der::{Decode, Encode};
 use yubikey::certificate::Certificate;
 use yubikey::piv::SlotId;
 use yubikey::YubiKey;
@@ -56,6 +56,11 @@ impl CertificateInfo {
     /// Check if the certificate has expired.
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.not_after
+    }
+
+    /// Check whether the certificate validity period has started.
+    pub fn is_not_yet_valid(&self) -> bool {
+        Utc::now() < self.not_before
     }
 
     /// Return the DER-encoded certificate bytes.
@@ -146,31 +151,68 @@ fn parse_x509_time(time: &x509_cert::time::Time) -> Result<DateTime<Utc>, Yubira
     Ok(DateTime::<Utc>::from(dt))
 }
 
+fn rsa_modulus_bit_len(modulus: &[u8]) -> Result<usize, YubiraError> {
+    let first = modulus.first().ok_or_else(|| {
+        YubiraError::NoCertificate("RSA certificate contains an empty modulus".to_string())
+    })?;
+    Ok((modulus.len() - 1) * 8 + (8 - first.leading_zeros() as usize))
+}
+
+fn supported_rsa_key_type(bit_len: usize) -> Result<KeyType, YubiraError> {
+    if bit_len == 2048 {
+        return Ok(KeyType::Rsa);
+    }
+
+    Err(YubiraError::NoCertificate(format!(
+        "Unsupported RSA key size: {bit_len}. Yubira currently supports RSA-2048; \
+         use P-384 for a higher-strength cross-language configuration."
+    )))
+}
+
+fn detect_supported_rsa_key_type(
+    spki: &x509_cert::spki::SubjectPublicKeyInfoOwned,
+) -> Result<KeyType, YubiraError> {
+    let public_key = pkcs1::RsaPublicKey::from_der(spki.subject_public_key.raw_bytes())
+        .map_err(|e| YubiraError::NoCertificate(format!("Failed to parse RSA public key: {e}")))?;
+    supported_rsa_key_type(rsa_modulus_bit_len(public_key.modulus.as_bytes())?)
+}
+
+fn detect_supported_ec_key_type(
+    parameters: Option<&der::asn1::Any>,
+) -> Result<KeyType, YubiraError> {
+    use der::oid::db::rfc5912::{SECP_256_R_1, SECP_384_R_1};
+
+    let parameters = parameters.ok_or_else(|| {
+        YubiraError::NoCertificate("EC certificate is missing curve parameters".to_string())
+    })?;
+    let curve_oid = parameters
+        .decode_as::<der::asn1::ObjectIdentifier>()
+        .map_err(|e| {
+            YubiraError::NoCertificate(format!("Failed to parse EC curve OID: {e}"))
+        })?;
+
+    match curve_oid {
+        SECP_256_R_1 => Ok(KeyType::EcP256),
+        SECP_384_R_1 => Ok(KeyType::EcP384),
+        _ => Err(YubiraError::NoCertificate(format!(
+            "Unsupported EC curve OID: {curve_oid}"
+        ))),
+    }
+}
+
 fn detect_key_type(
     spki: &x509_cert::spki::SubjectPublicKeyInfoOwned,
 ) -> Result<KeyType, YubiraError> {
-    use der::oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION, SECP_384_R_1};
+    use der::oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION};
 
     let alg_oid = &spki.algorithm.oid;
 
     if *alg_oid == RSA_ENCRYPTION {
-        return Ok(KeyType::Rsa);
+        return detect_supported_rsa_key_type(spki);
     }
 
     if *alg_oid == ID_EC_PUBLIC_KEY {
-        if let Some(params) = &spki.algorithm.parameters {
-            let curve_oid =
-                params
-                    .decode_as::<der::asn1::ObjectIdentifier>()
-                    .map_err(|e| {
-                        YubiraError::NoCertificate(format!("Failed to parse EC curve OID: {e}"))
-                    })?;
-            if curve_oid == SECP_384_R_1 {
-                return Ok(KeyType::EcP384);
-            }
-            return Ok(KeyType::EcP256);
-        }
-        return Ok(KeyType::EcP256);
+        return detect_supported_ec_key_type(spki.algorithm.parameters.as_ref());
     }
 
     Err(YubiraError::NoCertificate(format!(
@@ -268,6 +310,21 @@ mod tests {
     }
 
     #[test]
+    fn test_certificate_info_is_not_yet_valid() {
+        let future = CertificateInfo {
+            der_bytes: vec![],
+            slot: SlotId::Authentication,
+            subject: "CN=test".into(),
+            serial_number: "12345".into(),
+            not_before: Utc::now() + chrono::Duration::days(1),
+            not_after: Utc::now() + chrono::Duration::days(365),
+            key_type: KeyType::Rsa,
+        };
+        assert!(future.is_not_yet_valid());
+        assert!(!future.is_expired());
+    }
+
+    #[test]
     fn test_certificate_info_to_der() {
         let info = CertificateInfo {
             der_bytes: vec![0x30, 0x82, 0x01],
@@ -287,5 +344,69 @@ mod tests {
         assert_eq!(KeyType::EcP256, KeyType::EcP256);
         assert_eq!(KeyType::EcP384, KeyType::EcP384);
         assert_ne!(KeyType::Rsa, KeyType::EcP256);
+    }
+
+    #[test]
+    fn test_supported_ec_curves_are_allowlisted_exactly() {
+        use der::oid::db::rfc5912::{SECP_256_R_1, SECP_384_R_1};
+
+        let p256 = der::asn1::Any::encode_from(&SECP_256_R_1).unwrap();
+        let p384 = der::asn1::Any::encode_from(&SECP_384_R_1).unwrap();
+
+        assert_eq!(
+            detect_supported_ec_key_type(Some(&p256)).unwrap(),
+            KeyType::EcP256
+        );
+        assert_eq!(
+            detect_supported_ec_key_type(Some(&p384)).unwrap(),
+            KeyType::EcP384
+        );
+    }
+
+    #[test]
+    fn test_unknown_ec_curve_is_rejected() {
+        let secp256k1 = der::asn1::ObjectIdentifier::new_unwrap("1.3.132.0.10");
+        let parameters = der::asn1::Any::encode_from(&secp256k1).unwrap();
+
+        let error = detect_supported_ec_key_type(Some(&parameters)).unwrap_err();
+        assert!(error.to_string().contains("Unsupported EC curve OID"));
+    }
+
+    #[test]
+    fn test_missing_ec_curve_parameters_are_rejected() {
+        let error = detect_supported_ec_key_type(None).unwrap_err();
+        assert!(error.to_string().contains("missing curve parameters"));
+    }
+
+    #[test]
+    fn test_malformed_ec_curve_parameters_are_rejected() {
+        let parameters = der::asn1::Any::new(der::Tag::Null, Vec::<u8>::new()).unwrap();
+
+        let error = detect_supported_ec_key_type(Some(&parameters)).unwrap_err();
+        assert!(error.to_string().contains("Failed to parse EC curve OID"));
+    }
+
+    #[test]
+    fn test_rsa_modulus_bit_length() {
+        assert_eq!(rsa_modulus_bit_len(&vec![0x80; 128]).unwrap(), 1024);
+        assert_eq!(rsa_modulus_bit_len(&vec![0x80; 256]).unwrap(), 2048);
+        assert_eq!(rsa_modulus_bit_len(&vec![0x80; 384]).unwrap(), 3072);
+        assert_eq!(rsa_modulus_bit_len(&vec![0x80; 512]).unwrap(), 4096);
+        assert!(rsa_modulus_bit_len(&[]).is_err());
+    }
+
+    #[test]
+    fn test_rsa_2048_is_supported() {
+        assert_eq!(supported_rsa_key_type(2048).unwrap(), KeyType::Rsa);
+    }
+
+    #[test]
+    fn test_unsupported_rsa_sizes_are_rejected() {
+        for bit_len in [1024, 3072, 4096] {
+            let error = supported_rsa_key_type(bit_len).unwrap_err();
+            assert!(error.to_string().contains(&format!(
+                "Unsupported RSA key size: {bit_len}"
+            )));
+        }
     }
 }

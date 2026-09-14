@@ -16,14 +16,18 @@
 
 //! YubiKey IAM Roles Anywhere credential process.
 
+mod certificate_chain;
 mod certificate_reader;
 mod error;
+mod input_validation;
 mod pin_handler;
 mod request_signer;
 mod roles_anywhere_client;
 mod yubikey_connector;
 
 use clap::Parser;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process;
 
 use crate::error::YubiraError;
@@ -59,11 +63,15 @@ struct Cli {
     #[arg(long)]
     serial: Option<u32>,
 
+    /// Optional PEM bundle of up to five intermediates, leaf issuer first
+    #[arg(long)]
+    certificate_chain: Option<PathBuf>,
+
     /// Session duration in seconds
     #[arg(long, default_value_t = 3600)]
     session_duration: u32,
 
-    /// Enable debug output (prints request details to stderr)
+    /// Enable redacted diagnostics (never prints credentials or signed requests)
     #[arg(long)]
     debug: bool,
 }
@@ -71,6 +79,14 @@ struct Cli {
 fn run(cli: &Cli) -> Result<(), YubiraError> {
     // Parse slot
     let slot = certificate_reader::parse_slot(&cli.slot)?;
+
+    input_validation::validate_configuration(
+        &cli.trust_anchor_arn,
+        &cli.profile_arn,
+        &cli.role_arn,
+        &cli.region,
+        cli.session_duration,
+    )?;
 
     // Connect to YubiKey
     let mut yubikey = yubikey_connector::connect(cli.serial)?;
@@ -84,10 +100,24 @@ fn run(cli: &Cli) -> Result<(), YubiraError> {
             cert_info.not_after.format("%Y-%m-%d").to_string(),
         ));
     }
+    if cert_info.is_not_yet_valid() {
+        return Err(YubiraError::CertificateNotYetValid(
+            cert_info.not_before.format("%Y-%m-%d").to_string(),
+        ));
+    }
 
-    // Handle PIN
-    let pin = pin_handler::get_pin_auto()?;
-    pin_handler::verify_pin(&mut yubikey, &pin)?;
+    let certificate_chain = cli
+        .certificate_chain
+        .as_deref()
+        .map(|path| certificate_chain::load_certificate_chain(path, cert_info.to_der()))
+        .transpose()?;
+
+    // Acquire and verify the PIN in a short scope. Zeroizing<String> scrubs its
+    // owned allocation before signing or credential acquisition begins.
+    {
+        let pin = pin_handler::get_pin_auto()?;
+        pin_handler::verify_pin(&mut yubikey, pin.as_str())?;
+    }
 
     // Sign and call CreateSession
     let credentials = roles_anywhere_client::create_session(
@@ -99,14 +129,19 @@ fn run(cli: &Cli) -> Result<(), YubiraError> {
         &cli.role_arn,
         &cli.region,
         cli.session_duration,
+        certificate_chain.as_deref(),
         cli.debug,
     )?;
 
-    // Output credentials as JSON to stdout
+    // Serialize directly to locked stdout to avoid another aggregate secret copy.
     let output = credentials.to_credential_process_output();
-    println!("{}", serde_json::to_string(&output).map_err(|e| {
-        YubiraError::Api(format!("Failed to serialize credentials: {e}"))
-    })?);
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer(&mut stdout, &output)
+        .map_err(|e| YubiraError::Api(format!("Failed to serialize credentials: {e}")))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|e| YubiraError::Api(format!("Failed to write credentials: {e}")))?;
 
     Ok(())
 }

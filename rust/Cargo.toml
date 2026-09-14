@@ -14,14 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 # YubiKey PIV operations
-yubikey = { version = "0.8", features = ["untested"] }
+# Stable APIs used by Yubira do not require the crate's broad `untested` feature.
+yubikey = "0.8"
 
 # Cryptography
 x509-cert = { version = "0.2", features = ["pem"] }
 der = { version = "0.7", features = ["alloc"] }
-rsa = "0.9"
-p256 = "0.13"
-p384 = "0.13"
+pkcs1 = "=0.7.5"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
@@ -32,6 +31,7 @@ ureq = { version = "2", features = ["json"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+zeroize = { version = "=1.8.2", features = ["derive"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
