@@ -142,6 +142,11 @@ aws sts get-caller-identity --profile yubikey
 If you have multiple YubiKeys, specify the serial number:
 
 ```ini
+[yubikey-work]
+credential_process = yubira.exe --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc123 --profile-arn arn:aws:rolesanywhere:us-east-1:123456789012:profile/def456 --role-arn arn:aws:iam::123456789012:role/MyRole --serial 12345678
+```
+
+### Using an Intermediate Certificate Chain
 
 For a leaf certificate issued through intermediates, provide a PEM bundle ordered from the leaf issuer toward the configured trust anchor:
 
@@ -150,9 +155,6 @@ credential_process = yubira --trust-anchor-arn <TRUST_ANCHOR_ARN> --profile-arn 
 ```
 
 The option accepts at most five certificates and a 64 KiB file. Yubira rejects malformed, duplicate, or incorrectly ordered chains. It sends the bundle as signed, comma-delimited base64 DER in `X-Amz-X509-Chain`; omit the option when the leaf chains directly to the trust anchor.
-[yubikey-work]
-credential_process = yubira.exe --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/abc123 --profile-arn arn:aws:rolesanywhere:us-east-1:123456789012:profile/def456 --role-arn arn:aws:iam::123456789012:role/MyRole --serial 12345678
-```
 
 ### Using Different PIV Slots
 
@@ -206,6 +208,8 @@ Yubira uses YubiKey hardware tokens with X.509 certificates via IAM Roles Anywhe
 - **Replaces static IAM users for emergency access** — No need to create long-lived IAM user credentials. The YubiKey certificate provides a hardware-bound identity that can be used for break-glass scenarios without maintaining static access keys.
 - **Immune to password reset phishing** — PIN and fingerprint verification happen onboard the YubiKey itself, depending on device capabilities. There is no password to set in AWS IAM or AWS IAM Identity Center, so there is nothing for an attacker to reset or intercept through phishing.
 - **Fully integrated in CLI** — Ships as a standard AWS credential helper, plugging directly into `~/.aws/credentials` with `credential_process`. No browser, no SSO portal, no manual token copy-paste.
+- **Flexible temporary-credential issuance** — IAM role trust policies and IAM Roles Anywhere profiles can authorize multiple approved paths for issuing temporary AWS credentials without creating long-lived IAM user keys.
+- **Certificate-derived audit identity** — IAM Roles Anywhere can preserve the original X.509 identity as the STS source identity through `sts:SetSourceIdentity`, improving attribution in CloudTrail.
 
 ### Cons
 
