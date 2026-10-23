@@ -3,8 +3,8 @@
 
 [package]
 name = "yubira"
-version = "0.1.0"
-edition = "2021"
+version = "0.1.1"
+edition = "2026"
 description = "YubiKey IAM Roles Anywhere credential process"
 license = "MIT-0"
 
